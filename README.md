@@ -79,7 +79,7 @@ If you find this project useful for your research, please consider citing:
 @article{lou2025overlock,
   title={OverLoCK: An Overview-first-Look-Closely-next ConvNet with Context-Mixing Dynamic Kernels},
   author={Meng Lou and Yizhou Yu},
-  journal={arXiv preprint arXiv:2502.20087},
+  journal={IEEE/CVF Conference on Computer Vision and Pattern Recognition},
   year={2025}
 }
 ```
