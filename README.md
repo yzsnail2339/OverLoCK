@@ -76,10 +76,10 @@ Code is currently being cleaned up. Please stay tuned.
 # Citation
 If you find this project useful for your research, please consider citing:
 ```
-@article{lou2025overlock,
+@inproceedings{lou2025overlock,
   title={OverLoCK: An Overview-first-Look-Closely-next ConvNet with Context-Mixing Dynamic Kernels},
   author={Meng Lou and Yizhou Yu},
-  journal={IEEE/CVF Conference on Computer Vision and Pattern Recognition},
+  booktitle={IEEE/CVF Conference on Computer Vision and Pattern Recognition},
   year={2025}
 }
 ```
