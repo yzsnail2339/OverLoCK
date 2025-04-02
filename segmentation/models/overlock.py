@@ -13,7 +13,9 @@ from mmengine.runner import load_checkpoint
 from torch.utils.checkpoint import checkpoint
 from timm.models.layers import DropPath, to_2tuple
 from timm.models.registry import register_model
-
+from mmseg.models.builder import MODELS
+from mmseg.utils import get_root_logger
+from mmcv.runner import load_checkpoint
 
 def get_conv2d(in_channels, 
                out_channels, 
@@ -487,7 +489,7 @@ class DynamicConvBlock(nn.Module):
     
 
     def _forward_inner(self, x, h_x, h_r):
-             
+        input_resoltion = x.shape[2:]
         B, C, H, W = x.shape
         B, C_h, H_h, W_h = h_x.shape
         
@@ -501,6 +503,18 @@ class DynamicConvBlock(nn.Module):
         x = self.fusion(x_f)
         gate = self.gate(x)
         lepe = self.lepe(x)
+        
+        is_pad = False
+        if min(H, W) < self.kernel_size:
+            is_pad = True
+            if H < W:
+                size = (self.kernel_size, int(self.kernel_size / H * W))
+            else:
+                size = (int(self.kernel_size / W * H), self.kernel_size)
+                
+            x = F.interpolate(x, size=size, mode='bilinear', align_corners=False)
+            x_f = F.interpolate(x_f, size=size, mode='bilinear', align_corners=False)
+            H, W = size
 
         query, key = torch.split(x_f, split_size_or_sections=[C, C_h], dim=1)
         query = self.weight_query(query) * self.scale
@@ -526,6 +540,10 @@ class DynamicConvBlock(nn.Module):
 
         x = torch.cat([x1, x2], dim=1)
         x = rearrange(x, 'b g h w c -> b (g c) h w', h=H, w=W)
+        
+        if is_pad:
+            x = F.adaptive_avg_pool2d(x, input_resoltion)
+        
         x = self.dyconv_proj(x)
 
         x = x + lepe
@@ -734,10 +752,17 @@ class OverLoCK(nn.Module):
             nn.Conv2d(projection, num_classes, kernel_size=1) if num_classes > 0 else nn.Identity()
         )
         
-        self.apply(self._init_weights)
+        self.extra_norm = nn.ModuleList()
+        for idx in range(4):
+            dim = embed_dim[idx]
+            if idx >= 2:
+                dim = dim + embed_dim[-1]//4
+            self.extra_norm.append(norm_layer(dim))
         
-        if torch.distributed.is_initialized():
-            self = nn.SyncBatchNorm.convert_sync_batchnorm(self)
+        del self.aux_head
+        del self.head
+        
+        self.apply(self._init_weights)
 
     def _init_weights(self, m):
         if isinstance(m, (nn.Linear, nn.Conv2d, nn.Conv1d)):
@@ -748,17 +773,28 @@ class OverLoCK(nn.Module):
             nn.init.constant_(m.weight, 1.0)
             nn.init.constant_(m.bias, 0)
     
+    
+    def _convert_sync_batchnorm(self):
+        if torch.distributed.is_initialized():
+            self = nn.SyncBatchNorm.convert_sync_batchnorm(self)
+            
     def forward_pre_features(self, x):
+        
+        outs = []
         
         x = self.patch_embed1(x)
         for blk in self.blocks1:
             x = blk(x)
+        
+        outs.append(self.extra_norm[0](x))
             
         x = self.patch_embed2(x)
         for blk in self.blocks2:
             x = blk(x)
 
-        return x
+        outs.append(self.extra_norm[1](x))
+        
+        return outs
     
     
     def forward_base_features(self, x):
@@ -775,8 +811,10 @@ class OverLoCK(nn.Module):
     
 
     def forward_sub_features(self, x, ctx):
-
-        ctx_cls = ctx
+        
+        outs = []
+        
+        # ctx_cls = ctx
         ctx_ori = self.high_level_proj(ctx)
         ctx_up = F.interpolate(ctx_ori, scale_factor=2, mode='bilinear', align_corners=False)
         
@@ -784,48 +822,33 @@ class OverLoCK(nn.Module):
             if idx == 0:
                 ctx = ctx_up
             x, ctx = blk(x, ctx, ctx_up)
-
+        
+        outs.append(self.extra_norm[2](torch.cat([x, ctx], dim=1)))
+        
         x, ctx = self.patch_embedx(x, ctx)
         for idx, blk in enumerate(self.sub_blocks4):
             x, ctx = blk(x, ctx, ctx_ori)
         
-        return (x, ctx_cls)
+        outs.append(self.extra_norm[3](x))
+        
+        return outs
 
     def forward_features(self, x):
         
-        x = self.forward_pre_features(x)
-        x, ctx = self.forward_base_features(x)
-        x, ctx_cls = self.forward_sub_features(x, ctx)
+        x0, x1 = self.forward_pre_features(x)
+        x, ctx = self.forward_base_features(x1)
+        x2, x3 = self.forward_sub_features(x, ctx)
 
-        return (x, ctx_cls)
+        return (x0, x1, x2, x3)
 
     def forward(self, x):
         
-        x, ctx = self.forward_features(x)
-        x = self.head(x).flatten(1)
-
-        if hasattr(self, 'aux_head') and self.training:
-            ctx = self.aux_head(ctx).flatten(1)
-            return dict(main=x, aux=ctx)
+        x = self.forward_features(x)
         
         return x
 
 
-def _cfg(url=None, **kwargs):
-    return {
-        'url': url,
-        'num_classes': 1000,
-        'input_size': (3, 224, 224),
-        'crop_pct': 0.9,
-        'interpolation': 'bicubic',  # 'bilinear' or 'bicubic'
-        'mean': timm.data.IMAGENET_DEFAULT_MEAN,
-        'std': timm.data.IMAGENET_DEFAULT_STD,
-        'classifier': 'classifier',
-        **kwargs,
-    }
-
-
-@register_model
+@MODELS.register_module()
 def overlock_xt(pretrained=False, pretrained_cfg=None, **kwargs):
     
     model = OverLoCK(
@@ -839,16 +862,15 @@ def overlock_xt(pretrained=False, pretrained_cfg=None, **kwargs):
         **kwargs
     )
 
-    model.default_cfg = _cfg(crop_pct=0.925)
-
     if pretrained:
-        pretrained = 'https://github.com/LMMMEng/OverLoCK/releases/download/v1/overlock_xt_in1k_224.pth'
-        load_checkpoint(model, pretrained)
-
+        pretrained = 'https://github.com/LMMMEng/OverLoCK/releases/download/v1/overlock_t_in1k_224.pth'
+        logger = get_root_logger()
+        load_checkpoint(model, pretrained, logger=logger)
+    model._convert_sync_batchnorm()
     return model
 
 
-@register_model
+@MODELS.register_module()
 def overlock_t(pretrained=False, pretrained_cfg=None, **kwargs):
     
     model = OverLoCK(
@@ -861,17 +883,16 @@ def overlock_t(pretrained=False, pretrained_cfg=None, **kwargs):
         sub_mlp_ratio=[3, 3],
         **kwargs
     )
-    
-    model.default_cfg = _cfg(crop_pct=0.95)
 
     if pretrained:
         pretrained = 'https://github.com/LMMMEng/OverLoCK/releases/download/v1/overlock_t_in1k_224.pth'
-        load_checkpoint(model, pretrained)
-
+        logger = get_root_logger()
+        load_checkpoint(model, pretrained, logger=logger)
+    model._convert_sync_batchnorm()
     return model
 
 
-@register_model
+@MODELS.register_module()
 def overlock_s(pretrained=False, pretrained_cfg=None, **kwargs):
     
     model = OverLoCK(
@@ -885,16 +906,15 @@ def overlock_s(pretrained=False, pretrained_cfg=None, **kwargs):
         **kwargs
     )
 
-    model.default_cfg = _cfg(crop_pct=0.95)
-
     if pretrained:
         pretrained = 'https://github.com/LMMMEng/OverLoCK/releases/download/v1/overlock_s_in1k_224.pth'
-        load_checkpoint(model, pretrained)
-
+        logger = get_root_logger()
+        load_checkpoint(model, pretrained, logger=logger)
+    model._convert_sync_batchnorm()
     return model
 
 
-@register_model
+@MODELS.register_module()
 def overlock_b(pretrained=None, pretrained_cfg=None, **kwargs):
     
     model = OverLoCK(
@@ -907,11 +927,10 @@ def overlock_b(pretrained=None, pretrained_cfg=None, **kwargs):
         sub_mlp_ratio=[3, 3],
         **kwargs
     )
-    
-    model.default_cfg = _cfg(crop_pct=0.975)
 
     if pretrained:
         pretrained = 'https://github.com/LMMMEng/OverLoCK/releases/download/v1/overlock_b_in1k_224.pth'
-        load_checkpoint(model, pretrained)
-
+        logger = get_root_logger()
+        load_checkpoint(model, pretrained, logger=logger)
+    model._convert_sync_batchnorm()
     return model

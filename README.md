@@ -3,7 +3,7 @@
 This is an official PyTorch implementation of "[OverLoCK: An Overview-first-Look-Closely-next ConvNet with Context-Mixing Dynamic Kernels](https://arxiv.org/abs/2502.20087)".
 
 # Introduction
-In the human vision system, top-down attention plays a crucial role in perception, wherein the brain initially performs an overall but rough scene analysis to extract salient cues (i.e., overview first), followed by a finer-grained examination to make more accurate judgments (i.e., look closely next). However, recent efforts in ConvNet designs primarily focused on increasing kernel size to obtain a larger receptive field without considering this crucial biomimetic mechanism to further improve performance. To this end, we propose a novel pure ConvNet vision backbone, termed OverLoCK, which is carefully devised from both the architecture and mixer perspectives. Specifically, we introduce a biomimetic Deep-stage Decomposition Strategy (DDS) that fuses semantically meaningful context representations into middle and deep layers by providing dynamic top-down context guidance at both feature and kernel weight levels. To fully unleash the power of top-down context guidance, we further propose a novel Context-Mixing Dynamic Convolution (ContMix) that effectively models long-range dependencies while preserving inherent local inductive biases even when the input resolution increases. These properties are absent in previous convolutions. With the support from both DDS and ContMix, our OverLoCK exhibits notable performance improvement over existing methods.
+Top-down attention plays a crucial role in the human vision system, wherein the brain initially obtains a rough overview of a scene to discover salient cues (i.e., overview first), followed by a more careful finer-grained examination (i.e., look closely next). However, modern ConvNets remain confined to a pyramid structure that successively downsamples the feature map for receptive field expansion, neglecting this crucial biomimetic principle. We present OverLoCK, the first pure ConvNet backbone architecture that explicitly incorporates a top-down attention mechanism. Unlike pyramid backbone networks, our design features a branched architecture with three synergistic sub-networks: 1) a Base-Net that encodes low/mid-level features; 2) a lightweight Overview-Net that generates dynamic top-down attention through coarse global context modeling (i.e., overview first); and 3) a robust Focus-Net that performs finer-grained perception guided by top-down attention (i.e., look closely next). To fully unleash the power of top-down attention, we further propose a novel context-mixing dynamic convolution (ContMix) that effectively models long-range dependencies while preserving inherent local inductive biases even when the input resolution increases, addressing critical limitations in existing convolutions. Our OverLoCK exhibits a notable performance improvement over existing methods.
 <center> 
 <img src="images/img.jpg" width="70%" height="auto">
 </center>
@@ -13,15 +13,13 @@ In the human vision system, top-down attention plays a crucial role in perceptio
 ## 1. Requirements
 We highly suggest using our provided dependencies to ensure reproducibility:
 ```
-# Environments:
-cuda==12.1
-python==3.10
-# Packages:
-torch==2.3.1
-timm==0.6.12
-natten==0.17.1
-depthwise_conv2d_implicit_gemm==0.0.0
+pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
+pip install natten==0.17.1+torch230cu121 -f https://shi-labs.com/natten/wheels/
+pip install timm==0.6.12
+pip install mmengine==0.2.0
 ```
+💡 To accelerate training and inference, we utilize the efficient large-kernel convolution proposed in [RepLKNet](https://github.com/DingXiaoH/RepLKNet-pytorch#use-our-efficient-large-kernel-convolution-with-pytorch). Please follow this [guideline](https://github.com/VITA-Group/SLaK#installation) to install the ``depthwise_conv2d_implicit_gemm`` function.
+
 
 ## 2. Data Preparation
 Prepare [ImageNet](https://image-net.org/) with the following folder structure, you can extract ImageNet by this [script](https://gist.github.com/BIGBALLON/8a71d225eff18d88e469e6ea9b39cef4).
@@ -70,23 +68,20 @@ python3 validate.py \
 --pretrained # or --checkpoint /path/to/checkpoint 
 ```
 
-# Object Detection and Semantic Segmentation
-Code is currently being cleaned up. Please stay tuned.
-
 # Citation
 If you find this project useful for your research, please consider citing:
 ```
 @inproceedings{lou2025overlock,
   title={OverLoCK: An Overview-first-Look-Closely-next ConvNet with Context-Mixing Dynamic Kernels},
   author={Meng Lou and Yizhou Yu},
-  booktitle={IEEE/CVF Conference on Computer Vision and Pattern Recognition},
+  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
   year={2025}
 }
 ```
 
 # Acknowledgment
 Our implementation is mainly based on the following codebases. We gratefully thank the authors for their wonderful works.  
-> [timm](https://github.com/rwightman/pytorch-image-models), [natten](https://github.com/SHI-Labs/NATTEN), [unireplknet](https://github.com/AILab-CVC/UniRepLKNet), [mmcv](https://github.com/open-mmlab/mmcv) [mmdet](https://github.com/open-mmlab/mmdetection), [mmseg](https://github.com/open-mmlab/mmsegmentation)  
+> [timm](https://github.com/rwightman/pytorch-image-models), [natten](https://github.com/SHI-Labs/NATTEN), [unireplknet](https://github.com/AILab-CVC/UniRepLKNet), [mmcv](https://github.com/open-mmlab/mmcv), [mmdet](https://github.com/open-mmlab/mmdetection), [mmseg](https://github.com/open-mmlab/mmsegmentation)  
 
 # Contact
 If you have any questions, please feel free to [create issues❓](https://github.com/LMMMEng/OverLoCK/issues) or [contact me 📧](lmzmm.0921@gmail.com).
