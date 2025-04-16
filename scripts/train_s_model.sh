@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 python3 -m torch.distributed.launch \
 --master_port=$((RANDOM+8888)) \
---nproc_per_node=8 \
+--nproc_per_node=4 \
 train.py \
---data-dir /data/dataset/imagenet/ \
---batch-size 256 \
+--data-dir ./datasets/imagenet/ \
+--batch-size 64 \
 --model overlock_s \
 --lr 1e-3 \
 --auto-lr \

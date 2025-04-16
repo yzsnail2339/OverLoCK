@@ -13,7 +13,7 @@ from mmengine.runner import load_checkpoint
 from torch.utils.checkpoint import checkpoint
 from timm.models.layers import DropPath, to_2tuple
 from timm.models.registry import register_model
-
+from mamba_ssm import Mamba
 
 def get_conv2d(in_channels, 
                out_channels, 
@@ -62,11 +62,13 @@ def get_bn(dim, use_sync_bn=False):
 
 
 def fuse_bn(conv, bn):
+    #作用是在模型推理阶段将 Conv + BatchNorm 两层融合为一层卷积，从而 加速模型、降低推理开销
     conv_bias = 0 if conv.bias is None else conv.bias
     std = (bn.running_var + bn.eps).sqrt()
     return conv.weight * (bn.weight / std).reshape(-1, 1, 1, 1), bn.bias + (conv_bias - bn.running_mean) * bn.weight / std
 
 def convert_dilated_to_nondilated(kernel, dilate_rate):
+    #将 带有扩张（dilation）的卷积核转换为 等效的不带扩张（非dilated）版本，也就是 **展开（“膨胀”）**原始卷积核，将其显式地插入空洞，形成一个大尺寸卷积核
     identity_kernel = torch.ones((1, 1, 1, 1)).to(kernel.device)
     if kernel.size(1) == 1:
         #   This is a DW kernel
@@ -81,6 +83,7 @@ def convert_dilated_to_nondilated(kernel, dilate_rate):
         return torch.cat(slices, dim=1)
 
 def merge_dilated_into_large_kernel(large_kernel, dilated_kernel, dilated_r):
+    #用于结构重参数化，把多个路径（如大核 + dilated kernel）合并为一个等效的大卷积核，用于加速推理部署
     large_k = large_kernel.size(2)
     dilated_k = dilated_kernel.size(2)
     equivalent_kernel_size = dilated_r * (dilated_k - 1) + 1
@@ -91,6 +94,7 @@ def merge_dilated_into_large_kernel(large_kernel, dilated_kernel, dilated_r):
 
 
 def stem(in_chans=3, embed_dim=96):
+    #将原始输入图像（如 3 通道 RGB 图）转换为一个空间分辨率更低但通道数更高的特征图，用于后续的深层网络处理。
     return nn.Sequential(
         nn.Conv2d(in_chans, embed_dim//2, kernel_size=3, stride=2, padding=1, bias=False),
         nn.BatchNorm2d(embed_dim//2),
@@ -107,6 +111,7 @@ def stem(in_chans=3, embed_dim=96):
 
 
 def downsample(in_dim, out_dim):
+    #降低特征图的空间分辨率（H×W），同时增加或调整通道数（C）
     return nn.Sequential(
         nn.Conv2d(in_dim, out_dim, kernel_size=3, stride=2, padding=1, bias=False),
         nn.BatchNorm2d(out_dim),
@@ -114,6 +119,7 @@ def downsample(in_dim, out_dim):
 
 
 class SEModule(nn.Module):
+    #根据全局上下文动态调整每个通道的重要性，提升网络的表示能力(通道注意力机制)
     def __init__(self, dim, red=8, inner_act=nn.GELU, out_act=nn.Sigmoid):
         super().__init__()
         inner_dim = max(16, dim // red)
@@ -132,6 +138,7 @@ class SEModule(nn.Module):
 
 
 class LayerScale(nn.Module):
+    #对每个通道的特征图进行逐通道缩放（scale）+ 偏置（bias）调整，是可学习的
     def __init__(self, dim, init_value=1e-5):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim, 1, 1, 1)*init_value, 
@@ -144,6 +151,7 @@ class LayerScale(nn.Module):
 
         
 class LayerNorm2d(nn.LayerNorm):
+    #对标准 nn.LayerNorm 的轻微改造，使其可以直接作用于形状为 [B, C, H, W] 的特征图
     def __init__(self, dim):
         super().__init__(normalized_shape=dim, eps=1e-6)
     
@@ -160,6 +168,7 @@ class GRN(nn.Module):
     This implementation is more efficient than the original (https://github.com/facebookresearch/ConvNeXt-V2)
     We assume the inputs to this layer are (N, C, H, W)
     """
+    #用每个通道的响应强度进行归一化调节
     def __init__(self, dim, use_bias=True):
         super().__init__()
         self.use_bias = use_bias
@@ -182,6 +191,7 @@ class DilatedReparamBlock(nn.Module):
     Dilated Reparam Block proposed in UniRepLKNet (https://github.com/AILab-CVC/UniRepLKNet)
     We assume the inputs to this block are (N, C, H, W)
     """
+    #在训练时组合多个不同扩张率（dilation）和大小的深度卷积核来增强感受野，推理时再合并成一个大核（reparameterization），从而获得既精准又高效的模型。
     def __init__(self, channels, kernel_size, deploy, use_sync_bn=False, attempt_use_lk_impl=True):
         super().__init__()
         self.lk_origin = get_conv2d(channels, channels, kernel_size, stride=1,
@@ -220,6 +230,7 @@ class DilatedReparamBlock(nn.Module):
         if not deploy:
             self.origin_bn = get_bn(channels, use_sync_bn)
             for k, r in zip(self.kernel_sizes, self.dilates):
+                #每个通道独立地进行一个带有 扩张效果（dilation） 的卷积，感受野比正常 kernel 更大，但参数量不变
                 self.__setattr__('dil_conv_k{}_{}'.format(k, r),
                                  nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=k, stride=1,
                                            padding=(r * (k - 1) + 1) // 2, dilation=r, groups=channels,
@@ -237,6 +248,7 @@ class DilatedReparamBlock(nn.Module):
         return out
 
     def merge_dilated_branches(self):
+        #将训练时的 多分支结构（主分支 + 多个 dilated 分支） 融合成一个等效的单个大卷积核，用于推理阶段
         if hasattr(self, 'origin_bn'):
             origin_k, origin_b = fuse_bn(self.lk_origin, self.origin_bn)
             for k, r in zip(self.kernel_sizes, self.dilates):
@@ -258,6 +270,7 @@ class DilatedReparamBlock(nn.Module):
        
 
 class CTXDownsample(nn.Module):
+    #同时对输入特征 x 和上下文特征 ctx 进行下采样（downsample）处理。
     def __init__(self, dim, h_dim):
         super().__init__()
         
@@ -280,6 +293,7 @@ class ResDWConv(nn.Conv2d):
     '''
     Depthwise convolution with residual connection
     '''
+    #一个 带残差连接（Residual Connection） 的 深度可分离卷积（Depthwise Convolution, DWConv）
     def __init__(self, dim, kernel_size=3):
         super().__init__(dim, dim, kernel_size=kernel_size, padding=kernel_size//2, groups=dim)
     
@@ -348,6 +362,7 @@ class RepConvBlock(nn.Module):
 
 
 class DynamicConvBlock(nn.Module):
+    #主干构建模块，用于融合主特征与上下文、动态生成卷积核权重，并结合结构重参数化、注意力和归一化机制，实现强表达与高推理效率的平衡。
     def __init__(self,
                  dim=64,
                  ctx_dim=32,
@@ -452,6 +467,7 @@ class DynamicConvBlock(nn.Module):
 
 
     def get_rpb(self):
+        #用来创建两个可学习的 相对位置偏置矩阵（RPB），分别对应两个不同大小的动态卷积核（smk_size 和 kernel_size），在后续 attention 权重计算中作为额外的空间先验加入。
         self.rpb_size1 = 2 * self.smk_size - 1
         self.rpb1 = nn.Parameter(torch.empty(self.num_heads, self.rpb_size1, self.rpb_size1))
         self.rpb_size2 = 2 * self.kernel_size - 1
@@ -462,6 +478,7 @@ class DynamicConvBlock(nn.Module):
         
     @torch.no_grad()
     def generate_idx(self, kernel_size):
+        #生成用于从 RPB（相对位置偏置）中提取偏置值的索引，以便后续在二维卷积窗口中快速查找每对相对位置的偏置。
         rpb_size = 2 * kernel_size - 1
         idx_h = torch.arange(0, kernel_size)
         idx_w = torch.arange(0, kernel_size)
@@ -473,6 +490,7 @@ class DynamicConvBlock(nn.Module):
         """
         RPB implementation directly borrowed from https://tinyurl.com/mrbub4t3
         """
+        #将相对位置偏置（RPB）正确应用到动态注意力权重（attn）中，以引入空间结构信息。
         num_repeat_h = torch.ones(kernel_size, dtype=torch.long)
         num_repeat_w = torch.ones(kernel_size, dtype=torch.long)
         num_repeat_h[kernel_size//2] = height - (kernel_size-1)
@@ -559,6 +577,31 @@ class DynamicConvBlock(nn.Module):
             x = self._forward_inner(x, h_x, h_r)
         return x
 
+# 定义 VisionMamba 模块，用于对 Overview-Net 特征图做全局摘要建模
+class VisionMamba(nn.Module):
+    def __init__(self, dim, d_state=16, d_conv=4, expand=2):
+        super(VisionMamba, self).__init__()
+        # 使用已经在 OverLoCK 中定义的 LayerNorm2d 对特征图归一化
+        self.norm = LayerNorm2d(dim)
+        # 初始化 mamba 模块，参数 d_state、d_conv 和 expand 可根据需要调整
+        self.mamba = Mamba(
+            d_model=dim,      # 模型通道数
+            d_state=d_state,  # 状态扩展因子
+            d_conv=d_conv,    # 局部卷积宽度
+            expand=expand,    # block 扩展因子
+        )
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        # 对输入特征进行归一化
+        x_norm = self.norm(x)
+        # 将空间维度展平成序列：[B, H*W, C]
+        x_flat = x_norm.flatten(2).transpose(1, 2)
+        # 使用 mamba 模块进行序列建模
+        x_mamba = self.mamba(x_flat)
+        # 将序列输出 reshape 回 [B, C, H, W]
+        out = x_mamba.transpose(1, 2).view(B, C, H, W)
+        return out
 
 class OverLoCK(nn.Module):
     '''
@@ -601,6 +644,8 @@ class OverLoCK(nn.Module):
         self.high_level_proj = nn.Conv2d(embed_dim[-1], embed_dim[-1]//4, kernel_size=1)
         self.patch_embedx = CTXDownsample(embed_dim[2], embed_dim[3])
         
+        self.ctx_mamba = VisionMamba(embed_dim[-1])
+
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depth) + sum(sub_depth))]
 
         self.blocks1 = nn.ModuleList()
@@ -771,6 +816,8 @@ class OverLoCK(nn.Module):
         for blk in self.blocks4:
             ctx = blk(ctx)
 
+        ctx = self.ctx_mamba(ctx)
+        
         return (x, ctx)
     
 

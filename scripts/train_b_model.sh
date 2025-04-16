@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-python3 -m torch.distributed.launch \
+torchrun \
+--nproc_per_node=4 \
 --master_port=$((RANDOM+8888)) \
---nproc_per_node=8 \
 train.py \
---data-dir /data/dataset/imagenet/ \
---batch-size 256 \
+--data-dir ./datasets/imagenet/ \
+--batch-size 128 \
 --model overlock_b \
 --lr 1e-3 \
 --auto-lr \
