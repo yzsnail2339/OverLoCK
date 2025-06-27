@@ -324,7 +324,8 @@ def get_args_parser():
     parser.add_argument('--log-wandb', action='store_true', default=False,
                         help='log training and validation metrics to wandb')
     parser.add_argument('--gpu-limit', default=1, type=float)
-    parser.add_argument('--local-rank', default=0, type=int)
+    # parser.add_argument('--local-rank', default=0, type=int)
+    
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
     
     return parser
@@ -335,7 +336,7 @@ def main(args):
     # Cache the args as a text string to save them in the output dir later
     args.device_name = torch.cuda.get_device_name()
     args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
-    
+
     setup_default_logging()
     # args, args_text = _parse_args()
     if args.local_rank == 0:
@@ -1070,4 +1071,5 @@ def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix='')
 if __name__ == '__main__':
     torch.cuda.empty_cache()
     args = get_args_parser().parse_args()
+    args.local_rank = int(os.environ.get("LOCAL_RANK", 0))
     main(args)

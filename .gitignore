@@ -1,0 +1,35 @@
+# 忽略所有内容
+*
+
+# 保留 .gitignore 本身
+!.gitignore
+
+# 允许 models 目录
+!models/
+!models/**/*.py
+
+# 忽略 pycache 和 pyc 文件，即使在 models/ 中
+models/**/__pycache__/
+models/**/*.pyc
+
+# 👇允许 overlock_t 和 overlock_xt 的 summary.csv 文件
+!output/
+!output/overlock_mmb_v1*/
+!output/overlock_mmb_v1*/**/
+!output/overlock_mmb_v1*/**/summary.csv
+
+!output/overlock_mmb*/
+!output/overlock_mmb*/**/
+!output/overlock_mmb*/**/summary.csv
+
+!output/overlock_xt*/
+!output/overlock_xt*/**/
+!output/overlock_xt*/**/summary.csv
+
+!output/overlock_xt_*/
+!output/overlock_xt_*/**/
+!output/overlock_xt_*/**/summary.csv
+
+
+# 可选：如果你用 VSCode，可以忽略其配置
+.vscode/

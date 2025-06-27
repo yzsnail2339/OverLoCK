@@ -14,6 +14,7 @@ from torch.utils.checkpoint import checkpoint
 from timm.models.layers import DropPath, to_2tuple
 from timm.models.registry import register_model
 from mamba_ssm import Mamba
+from models.mmbank import MambaLayer, BiPixelMambaLayer, BiWindowMambaLayer
 
 def get_conv2d(in_channels, 
                out_channels, 
@@ -577,31 +578,6 @@ class DynamicConvBlock(nn.Module):
             x = self._forward_inner(x, h_x, h_r)
         return x
 
-# 定义 VisionMamba 模块，用于对 Overview-Net 特征图做全局摘要建模
-class VisionMamba(nn.Module):
-    def __init__(self, dim, d_state=16, d_conv=4, expand=2):
-        super(VisionMamba, self).__init__()
-        # 使用已经在 OverLoCK 中定义的 LayerNorm2d 对特征图归一化
-        self.norm = LayerNorm2d(dim)
-        # 初始化 mamba 模块，参数 d_state、d_conv 和 expand 可根据需要调整
-        self.mamba = Mamba(
-            d_model=dim,      # 模型通道数
-            d_state=d_state,  # 状态扩展因子
-            d_conv=d_conv,    # 局部卷积宽度
-            expand=expand,    # block 扩展因子
-        )
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        # 对输入特征进行归一化
-        x_norm = self.norm(x)
-        # 将空间维度展平成序列：[B, H*W, C]
-        x_flat = x_norm.flatten(2).transpose(1, 2)
-        # 使用 mamba 模块进行序列建模
-        x_mamba = self.mamba(x_flat)
-        # 将序列输出 reshape 回 [B, C, H, W]
-        out = x_mamba.transpose(1, 2).contiguous().view(B, C, H, W)
-        return out
 
 class OverLoCK(nn.Module):
     '''
@@ -655,10 +631,9 @@ class OverLoCK(nn.Module):
         self.sub_blocks4 = nn.ModuleList()
         self.memory_bank = nn.ModuleList()
         
-        for i in range(depth[3]):
-            self.memory_bank.append(
-                VisionMamba(embed_dim[-1])
-            )
+        for i in range(depth[3], 0, -1):
+            self.memory_bank.append(BiWindowMambaLayer(embed_dim[-1], i+1))
+            self.memory_bank.append(BiPixelMambaLayer(embed_dim[-1], i+1))
 
 
         for i in range(depth[0]):
@@ -881,7 +856,7 @@ def _cfg(url=None, **kwargs):
 
 
 @register_model
-def overlock_xt(pretrained=False, pretrained_cfg=None, **kwargs):
+def overlock_mmb(pretrained=False, pretrained_cfg=None, **kwargs):
     
     model = OverLoCK(
         depth=[2, 2, 3, 2],
@@ -898,75 +873,6 @@ def overlock_xt(pretrained=False, pretrained_cfg=None, **kwargs):
 
     if pretrained:
         pretrained = 'https://github.com/LMMMEng/OverLoCK/releases/download/v1/overlock_xt_in1k_224.pth'
-        load_checkpoint(model, pretrained)
-
-    return model
-
-
-@register_model
-def overlock_t(pretrained=False, pretrained_cfg=None, **kwargs):
-    
-    model = OverLoCK(
-        depth=[4, 4, 6, 2],
-        sub_depth=[12, 2],
-        embed_dim=[64, 128, 256, 512],
-        kernel_size=[17, 15, 13, 7],
-        mlp_ratio=[4, 4, 4, 4],
-        sub_num_heads=[4, 8],
-        sub_mlp_ratio=[3, 3],
-        **kwargs
-    )
-    
-    model.default_cfg = _cfg(crop_pct=0.95)
-
-    if pretrained:
-        pretrained = 'https://github.com/LMMMEng/OverLoCK/releases/download/v1/overlock_t_in1k_224.pth'
-        load_checkpoint(model, pretrained)
-
-    return model
-
-
-@register_model
-def overlock_s(pretrained=False, pretrained_cfg=None, **kwargs):
-    
-    model = OverLoCK(
-        depth=[6, 6, 8, 3],
-        sub_depth=[16, 3],
-        embed_dim=[64, 128, 320, 512],
-        kernel_size=[17, 15, 13, 7],
-        mlp_ratio=[4, 4, 4, 4],
-        sub_num_heads=[8, 16],
-        sub_mlp_ratio=[3, 3],
-        **kwargs
-    )
-
-    model.default_cfg = _cfg(crop_pct=0.95)
-
-    if pretrained:
-        pretrained = 'https://github.com/LMMMEng/OverLoCK/releases/download/v1/overlock_s_in1k_224.pth'
-        load_checkpoint(model, pretrained)
-
-    return model
-
-
-@register_model
-def overlock_b(pretrained=None, pretrained_cfg=None, **kwargs):
-    
-    model = OverLoCK(
-        depth=[8, 8, 10, 4],
-        sub_depth=[20, 4],
-        embed_dim=[80, 160, 384, 576],
-        kernel_size=[17, 15, 13, 7],
-        mlp_ratio=[4, 4, 4, 4],
-        sub_num_heads=[6, 9],
-        sub_mlp_ratio=[3, 3],
-        **kwargs
-    )
-    
-    model.default_cfg = _cfg(crop_pct=0.975)
-
-    if pretrained:
-        pretrained = 'https://github.com/LMMMEng/OverLoCK/releases/download/v1/overlock_b_in1k_224.pth'
         load_checkpoint(model, pretrained)
 
     return model
